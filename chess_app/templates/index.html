@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Local Multiplayer Chess</title>
+  <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      background: #f5f5f5;
+      color: #222;
+    }
+    .container {
+      max-width: 900px;
+      margin: 24px auto;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      padding: 24px;
+    }
+    .screen { display: none; }
+    .screen.active { display: block; }
+    input, button {
+      padding: 10px;
+      margin: 6px 0;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    button { cursor: pointer; }
+    .link {
+      color: #0055cc;
+      cursor: pointer;
+      text-decoration: underline;
+      display: inline-block;
+      margin-top: 8px;
+    }
+    #board {
+      width: 100%;
+      max-width: 520px;
+      margin: 12px auto;
+    }
+    .status {
+      margin-top: 12px;
+      font-weight: bold;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="loginScreen" class="screen active">
+      <h2>Login</h2>
+      <input id="loginUsername" placeholder="Username" />
+      <input id="loginPassword" type="password" placeholder="Password" />
+      <button id="loginBtn">Login</button>
+      <span id="toRegister" class="link">Create one!</span>
+    </div>
+
+    <div id="registerScreen" class="screen">
+      <h2>Register</h2>
+      <input id="registerUsername" placeholder="User ID" />
+      <input id="registerPassword" type="password" placeholder="Password" />
+      <input id="registerPassword2" type="password" placeholder="Re-enter Password" />
+      <button id="registerBtn">Register</button>
+      <span id="toLogin" class="link">Back to Login</span>
+    </div>
+
+    <div id="homeScreen" class="screen">
+      <h2 id="welcomeText">Welcome</h2>
+      <input id="opponentInput" placeholder="Opponent ID" />
+      <button id="challengeBtn">Challenge</button>
+    </div>
+
+    <div id="arenaScreen" class="screen">
+      <h2>Chess Arena</h2>
+      <div id="board"></div>
+      <div id="gameStatus" class="status">Waiting for game start...</div>
+    </div>
+  </div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+  <script>
+    const socket = io();
+
+    let currentUser = null;
+    let roomId = null;
+    let playerColor = null;
+    let board = null;
+    let game = new Chess();
+
+    function showScreen(screenId) {
+      $('.screen').removeClass('active');
+      $(screenId).addClass('active');
+    }
+
+    function updateStatus() {
+      if (!roomId) {
+        $('#gameStatus').text('Waiting for game start...');
+        return;
+      }
+
+      if (game.game_over()) {
+        if (game.in_checkmate()) {
+          const winner = game.turn() === 'w' ? 'Black' : 'White';
+          $('#gameStatus').text(`Checkmate! ${winner} wins.`);
+        } else {
+          $('#gameStatus').text('Game over (draw).');
+        }
+        return;
+      }
+
+      const turn = game.turn() === 'w' ? 'White' : 'Black';
+      $('#gameStatus').text(`${turn} to move.`);
+    }
+
+    function setupBoard() {
+      board = Chessboard('board', {
+        draggable: true,
+        position: 'start',
+        orientation: playerColor === 'black' ? 'black' : 'white',
+        onDragStart: (source, piece) => {
+          if (!roomId || game.game_over()) return false;
+
+          const turnColor = game.turn() === 'w' ? 'white' : 'black';
+          if (turnColor !== playerColor) return false;
+
+          if ((playerColor === 'white' && piece.startsWith('b')) ||
+              (playerColor === 'black' && piece.startsWith('w'))) {
+            return false;
+          }
+
+          return true;
+        },
+        onDrop: (source, target) => {
+          const move = game.move({ from: source, to: target, promotion: 'q' });
+          if (move === null) return 'snapback';
+
+          board.position(game.fen());
+          updateStatus();
+
+          socket.emit('make_move', {
+            room_id: roomId,
+            move: source + target,
+            fen: game.fen()
+          });
+        },
+        onSnapEnd: () => {
+          board.position(game.fen());
+        }
+      });
+
+      updateStatus();
+    }
+
+    $('#toRegister').on('click', () => showScreen('#registerScreen'));
+    $('#toLogin').on('click', () => showScreen('#loginScreen'));
+
+    $('#registerBtn').on('click', () => {
+      const username = $('#registerUsername').val().trim();
+      const password = $('#registerPassword').val();
+      const password2 = $('#registerPassword2').val();
+
+      if (!username || !password) {
+        alert('Username and password are required.');
+        return;
+      }
+
+      if (password !== password2) {
+        alert('Passwords do not match.');
+        return;
+      }
+
+      socket.emit('register', { username, password });
+    });
+
+    $('#loginBtn').on('click', () => {
+      const username = $('#loginUsername').val().trim();
+      const password = $('#loginPassword').val();
+      socket.emit('login', { username, password });
+    });
+
+    $('#challengeBtn').on('click', () => {
+      const opponent = $('#opponentInput').val().trim();
+      if (!opponent) {
+        alert('Please enter an Opponent ID.');
+        return;
+      }
+      socket.emit('send_challenge', { from: currentUser, to: opponent });
+    });
+
+    socket.on('register_response', (data) => {
+      if (data.ok) {
+        alert(data.message);
+        showScreen('#loginScreen');
+      } else {
+        alert(data.message);
+      }
+    });
+
+    socket.on('login_response', (data) => {
+      if (!data.ok) {
+        alert(data.message);
+        return;
+      }
+
+      currentUser = data.username;
+      $('#welcomeText').text(`Welcome ${currentUser}`);
+      showScreen('#homeScreen');
+    });
+
+    socket.on('challenge_response', (data) => {
+      if (!data.ok) {
+        alert(data.message || 'Failed to send challenge.');
+      }
+    });
+
+    socket.on('receive_challenge', (data) => {
+      const accepted = confirm(`${data.from} challenged you to a game. Accept?`);
+      if (accepted) {
+        socket.emit('accept_challenge', {
+          challenger: data.from,
+          challenged: currentUser
+        });
+      }
+    });
+
+    socket.on('start_game', (data) => {
+      if (!data.ok) {
+        alert(data.message || 'Unable to start game.');
+        return;
+      }
+
+      roomId = data.room_id;
+      playerColor = data.your_color;
+      game = new Chess();
+
+      showScreen('#arenaScreen');
+      setupBoard();
+      $('#gameStatus').text(`Game started. You are ${playerColor}. Opponent: ${data.opponent}.`);
+    });
+
+    socket.on('move_made', (data) => {
+      if (!roomId || !data.fen) return;
+      game.load(data.fen);
+      board.position(game.fen());
+      updateStatus();
+    });
+  </script>
+</body>
+</html>
